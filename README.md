@@ -11,6 +11,14 @@
 > region is repainted*, history grid for iterate-on-a-previous-image. Single-file frontend, no build step, no CDN.
 > Decoupled from ComfyUI: the only contact points are its root directory and its HTTP port.
 
+**UX 是新拟态（neumorphism）**：浅灰底 + 双向柔和阴影（一边深一边浅），**悬停 = 阴影变深"抬起来"、按下 = 阴影翻成
+inset"按进去"**；控件全部自绘（`appearance:none`，连步进器、确认框、滚动条都是），界面上没有一个原生控件。
+交互与动效手法取自作者自己的组件库 **[Offblink/Gasp-Design](https://github.com/Offblink/Gasp-Design)**，
+GSAP / Flip 两份库**本地内置、不连 CDN**。
+
+面板看着的模型是 **Qwen-Image-2.1**（本仓的实测数字都在它 + RTX 5070 Ti Laptop 12 GB 上跑出来），
+但面板对模型没有任何假设 —— 只要后端是 ComfyUI，换别的权重照样能用。
+
 ![生成页](docs/panel-generate.png)
 
 ![框选 + 改动建议 → 只重画框内](docs/panel-edit.png)
@@ -26,6 +34,9 @@
 ## 快速开始（Windows）
 
 前提：一份能出图的 ComfyUI（自带 `.venv` 与 `main.py`），以及 Python 3.12 / 3.13。
+面板**不挑模型**；本仓的实测数字是在 **Qwen-Image-2.1** 上跑的，ComfyUI 直接可用的那份单文件权重在
+[`Comfy-Org/Qwen-Image-2.1`](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)（HF）/ [ModelScope 镜像](https://modelscope.cn/models/Comfy-Org/Qwen-Image-2.1)
+（上游：[QwenLM/Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1)）。
 
 ```bat
 git clone https://github.com/Offblink/Qwen-canvas && cd Qwen-canvas
@@ -73,8 +84,9 @@ REM 3) 起面板并开浏览器
 
 ## 界面
 
-新拟态（浅灰底 + 双向柔和阴影）、**零原生控件**：左边常驻画布，右边三个页签，底部状态栏。
-所有控件自绘（`appearance:none`）、滚动条自绘、连删图确认框都是自绘的（Esc / 点背景 = 取消，Enter = 确定）。
+**新拟态（neumorphism）**、**零原生控件**：浅灰底 + 双向柔和阴影（一边深一边浅），左边常驻画布，右边三个页签，
+底部状态栏。所有控件自绘（`appearance:none`）、滚动条自绘、连删图确认框都是自绘的（Esc / 点背景 = 取消，
+Enter = 确定）。
 
 | 页签 | 内容 |
 |---|---|
@@ -123,8 +135,8 @@ LISTEN → 再起（不等端口释放就起，新进程会因端口占用直接
 
 ## 动效（4 处，全部本机内置）
 
-形式取自 `Offblink/Gasp-Design`（GSAP 3.12.7 + Flip），但**不引 CDN**：`vendor/gsap.min.js`（72 KB）+
-`vendor/Flip.min.js`（25 KB）跟着仓库走，由 `/vendor/<name>.js` 提供。
+形式取自 **[Offblink/Gasp-Design](https://github.com/Offblink/Gasp-Design)**（作者的 HTML 组件库，GSAP 3.12.7 + Flip），
+但**不引 CDN**：`vendor/gsap.min.js`（72 KB）+ `vendor/Flip.min.js`（25 KB）跟着仓库走，由 `/vendor/<name>.js` 提供。
 
 | 动效 | 实现 |
 |---|---|
@@ -178,6 +190,17 @@ LISTEN → 再起（不等端口释放就起，新进程会因端口占用直接
 ├── docs/                            README 截图
 └── CANVAS_NOTES.md                  面板口径：接口、动效坑、悬停规则、清理策略（**改动前先读这份**）
 ```
+
+## 相关项目
+
+| | |
+|---|---|
+| **Qwen-Image-2.1**<br>（本机喂给面板的模型） | 上游：[QwenLM/Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1) · [HuggingFace `Qwen/Qwen-Image-2.1`](https://huggingface.co/Qwen/Qwen-Image-2.1)<br>ComfyUI 直接可用的单文件权重（本机用的就是这份）：[`Comfy-Org/Qwen-Image-2.1` @ HuggingFace](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) · [同上的 ModelScope 镜像](https://modelscope.cn/models/Comfy-Org/Qwen-Image-2.1)（本机实测 ModelScope 2.4 MB/s ≫ hf-mirror 77 KB/s） |
+| **ComfyUI**<br>（面板的后端，出图与显存都在它那） | [Comfy-Org/ComfyUI](https://github.com/Comfy-Org/ComfyUI)（GPL-3.0） |
+| **Gasp-Design**<br>（界面手法与 4 处动效的出处） | [Offblink/Gasp-Design](https://github.com/Offblink/Gasp-Design)：改前/改后分割、进度环 + 数字递增、像素化落盘、Flip 补位，四个手法都取自它现成的组件，本仓只是把它们复刻到这套新拟态皮肤上（原组件用 three.js 的那处用 canvas 2D 重写，没引 three.js） |
+
+本仓只包含面板本身（MIT）。模型权重与 ComfyUI 各有各的授权（Qwen-Image-2.1 是 Qwen Research License，
+非宽松，商用前先确认），本仓不再分发它们。
 
 ## 已知边界
 
