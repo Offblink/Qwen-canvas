@@ -437,6 +437,12 @@ let seq = 0, sel = null;
 let refs = [];           // 已上传的参考图文件名
 let hist = [];           // 最近生成的图（名字）
 let busy = false, timer = null, lastFocus = null;
+let madeHere = null;     // 本次会话产出过的图（生成 / 局部重画）——「生成」页只显示它
+let page = 'gen';        // 当前页签
+/* 空态文案：真空态 / 「生成」页不摆历史图时（`showPage('gen')` 在启动时就会用到，必须在这之前定义） */
+const TIP_EMPTY = '还没有图<br>「生成」页填提示词点生成，或在「历史」页点一张<br>' +
+  '<b>出图后在图上按住左键拖一个方框 → 右边「修改」页写一句建议 → 点最下面的「应用修改」</b>';
+const TIP_GEN = '生成页只显示<b>本次生成的结果</b><br>填提示词点「生成」；要看或改历史图，去<b>「历史」</b>页点一张';
 
 const setStatus = t => $('status').textContent = t;
 const setElapsed = t => $('elapsed').textContent = t || '';
@@ -633,8 +639,10 @@ async function api(path, payload){
 /* ---------- 页签 ---------- */
 const tabs = [...document.querySelectorAll('#tabs button')];
 function showPage(name){
+  page = name;
   tabs.forEach(b => b.classList.toggle('on', b.dataset.page === name));
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'page-' + name));
+  paintStage();
 }
 tabs.forEach(b => b.onclick = () => showPage(b.dataset.page));
 showPage('gen');
@@ -677,6 +685,16 @@ const segSize = makeSeg($('segSize'), {items:[512,768,1024,1536,2048], value:102
   onChange: v => sizeSel.v = v});
 
 /* ---------- 显示 ---------- */
+/* 「生成」页**只显示本次会话生成出来的结果**：历史图不摆在那儿当预览（生成请求根本不读它，
+   摆着会让人以为"在用它生成 / 在改它"）。「修改 / 历史」页照旧显示当前底图；对比模式下别把图藏掉。 */
+function paintStage(){
+  const showIt = !!current && (page !== 'gen' || current === madeHere || cmpState.on);
+  wrap.style.display = showIt ? 'inline-block' : 'none';
+  const e = $('empty');
+  e.style.display = showIt ? 'none' : 'block';
+  if(!showIt) e.innerHTML = (hist.length || current) ? TIP_GEN : TIP_EMPTY;
+}
+
 function show(name, opt){
   const o = opt || {};
   current = name;
@@ -684,8 +702,7 @@ function show(name, opt){
   img.src = '/img?name=' + encodeURIComponent(name) + '&dir=output';
   img.onload = () => {
     natural = [img.naturalWidth || 1024, img.naturalHeight || 1024];
-    wrap.style.display = 'inline-block';
-    $('empty').style.display = 'none';
+    paintStage();
     render();
     if(o.reveal) pixelReveal();     // 新图落盘才做像素化淡入
   };
@@ -866,9 +883,8 @@ function clearCanvas(){
   cmpState.before = cmpState.after = null;
   current = null; regions = []; sel = null;
   img.removeAttribute('src');
-  wrap.style.display = 'none';
   boxes.innerHTML = '';
-  $('empty').style.display = 'block';
+  paintStage();
   renderRegions();
   renderHist();
   updateCmpBtn();
@@ -880,6 +896,7 @@ async function deleteHist(name){
   try{
     await api('/api/delete', {name});
     hist = hist.filter(n => n !== name);
+    if(madeHere === name) madeHere = null;
     if(current === name){
       const next = hist[0];
       if(next) show(next); else clearCanvas();
@@ -1040,6 +1057,7 @@ $('btnGen').onclick = async () => {
     });
     j.images.forEach(pushHist);
     regions = []; sel = null;
+    madeHere = j.images[j.images.length - 1];      // 本次产物：「生成」页就显示它
     show(j.images[j.images.length - 1], {reveal: true});
     stopTimer('生成完成', j.seconds);
     setMsg(`生成完成 ${j.seconds}s，${j.images.length} 张 —— 到「修改」页拖框`, true);
@@ -1063,6 +1081,7 @@ $('btnApply').onclick = async () => {
     pushHist(j.image);
     regions = []; sel = null;
     cmpState.before = before; cmpState.after = j.image;    // 给「改前 / 改后」对比用
+    madeHere = j.image;
     show(j.image, {reveal: true});
     stopTimer('改完', j.seconds);
     setMsg(`改完 ${j.seconds}s（${j.passes.length} 块）→ ${j.image}`, true);
@@ -1085,6 +1104,7 @@ $('btnWhole').onclick = async () => {
     pushHist(j.image);
     regions = []; sel = null;
     cmpState.before = before; cmpState.after = j.image;
+    madeHere = j.image;
     show(j.image, {reveal: true});
     stopTimer('改完', j.seconds);
     setMsg(`整图重画完成 ${j.seconds}s → ${j.image}`, true);
