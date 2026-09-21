@@ -1,0 +1,5 @@
+{
+  "_说明": "拷成 canvas.json 再用。相对路径按本目录解析；环境变量 QWEN_COMFY_ROOT 等优先级更高。",
+  "comfy_root": "../qwen-image-2.1/ComfyUI",
+  "comfy_autostart": true
+}

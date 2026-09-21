@@ -1,0 +1,14 @@
+# 面板自己的 venv（用 qwen_setup.ps1 建）
+.venv/
+__pycache__/
+*.pyc
+
+# 运行期日志
+canvas.log
+canvas.log.err
+
+# 本机快捷方式
+*.lnk
+
+# 本机配置（指向哪份 ComfyUI）：提交的是 canvas.json.example
+canvas.json
