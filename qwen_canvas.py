@@ -108,10 +108,14 @@ def start_comfy() -> bool:
     if not COMFY_AUTOSTART or not PY.exists() or not COMFY.is_dir():
         return False
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # CREATE_NO_WINDOW，**不要** DETACHED_PROCESS：venv 的 Scripts\python.exe 只是个 redirector
+    # （255 KB，基础解释器才 105 KB），它会再 CreateProcess 一次去起真解释器。DETACHED_PROCESS 把 console
+    # 整个拿掉 → 孩子没有可继承的 console → Windows 给它新分配一个 → 每次冷启都在屏幕上弹一个黑窗。
+    # 给它一个"没有窗口的 console"（CREATE_NO_WINDOW）就够：孩子继承得到，屏幕干净。
+    flags = 0x08000000 | 0x00000200        # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     with open(LOG, "ab") as fh:
-        subprocess.Popen([str(PY), *COMFY_CMD], cwd=str(COMFY), stdout=fh, stderr=subprocess.STDOUT,
-                         creationflags=flags, close_fds=True)
+        subprocess.Popen([str(PY), *COMFY_CMD], cwd=str(COMFY), stdin=subprocess.DEVNULL,
+                         stdout=fh, stderr=subprocess.STDOUT, creationflags=flags, close_fds=True)
     t0 = time.time()
     while time.time() - t0 < 300:
         if comfy_online():

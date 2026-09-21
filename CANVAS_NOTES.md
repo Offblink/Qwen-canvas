@@ -82,6 +82,13 @@
 
 - **ComfyUI HTTP API 的一层壳**，不自己加载模型：图落在 `output\`，显存是同一个服务。
 - 只要 stdlib + PIL；对 127.0.0.1 的调用**显式绕过系统代理**（本机开着 7897，urllib 会把 localhost 也塞进代理）。
+- **拉起 ComfyUI 用 `CREATE_NO_WINDOW`，不要 `DETACHED_PROCESS`**：venv 的 `Scripts\python.exe` 只是个 redirector
+  （255 KB，基础解释器才 105 KB），它会**再 `CreateProcess` 一次**去起真解释器。`DETACHED_PROCESS`（0x8）把 console
+  整个拿掉 → 孩子没有可继承的 console → Windows 给它**新分配一个** → **每次冷启都在屏幕上弹一个黑窗**
+  （实测：孩子进程的窗口 `IsWindowVisible=True`，面板自己的窗口是 hidden）。换成 `CREATE_NO_WINDOW`（0x08000000）
+  = 给它一个"没有窗口的 console"，孩子继承得到，屏幕干净；ComfyUI 仍然不依赖面板的 console，面板退出它照跑。
+- **验收这种"有没有弹窗"必须用窗口枚举**（`EnumWindows` + `IsWindowVisible` + `GetWindowThreadProcessId`），
+  别靠肉眼看任务栏、也别只查进程：修前那个窗口 `title=''`，任务栏不显眼，而进程数一点变化都没有。
 - 接口：`GET /api/state`（在线状态 + `autostart` + 最近图）、`GET /api/status`（队列 + **采样步数 `step/steps`**）、
   `POST /api/start`、`POST /api/generate`、`POST /api/local`（`regions` 为空 = 整图重画）、
   `POST /api/upload`（参考图，data URL）、`POST /api/delete`（`{name}` 删 `output\` 下的某张图；
