@@ -444,7 +444,6 @@ let page = 'gen';        // 当前页签
 const TIP_EMPTY = '还没有图<br>「生成」页填提示词点生成，或在「历史」页点一张<br>' +
   '<b>出图后在图上按住左键拖一个方框 → 右边「修改」页写一句建议 → 点最下面的「应用修改」</b>';
 const TIP_GEN = '生成页只显示<b>本次生成的结果</b><br>填提示词点「生成」；要看或改历史图，去<b>「历史」</b>页点一张';
-const TIP_BUSY = '生成中…<br>进度环在底部状态栏';
 
 const setStatus = t => $('status').textContent = t;
 const setElapsed = t => $('elapsed').textContent = t || '';
@@ -694,7 +693,7 @@ function paintStage(){
   wrap.style.display = showIt ? 'inline-block' : 'none';
   const e = $('empty');
   e.style.display = showIt ? 'none' : 'block';
-  if(!showIt) e.innerHTML = busy ? TIP_BUSY : ((hist.length || current) ? TIP_GEN : TIP_EMPTY);
+  if(!showIt) e.innerHTML = (hist.length || current) ? TIP_GEN : TIP_EMPTY;
 }
 
 function show(name, opt){
@@ -1052,8 +1051,6 @@ $('btnGen').onclick = async () => {
   const prompt = $('prompt').value.trim();
   if(!prompt){ setMsg('提示词不能为空'); return; }
   setMsg(''); busyOn(true); startTimer('生成中');
-  madeHere = null; paintStage();      // 点下去就把画布清掉：上一轮的结果已经不是"本次生成的结果"了，
-                                      // 而且生成期间那张图还能拖框、出图时 regions 会被清掉（框会白画）
   try{
     const j = await api('/api/generate', {
       prompt, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
@@ -1063,8 +1060,9 @@ $('btnGen').onclick = async () => {
     regions = []; sel = null;
     madeHere = j.images[j.images.length - 1];      // 本次产物：「生成」页就显示它
     show(j.images[j.images.length - 1], {reveal: true});
+    $('prompt').value = '';                        // 出图后清掉生成页的提示词（画布不动；参考图、尺寸/步数/张数/种子留着）
     stopTimer('生成完成', j.seconds);
-    setMsg(`生成完成 ${j.seconds}s，${j.images.length} 张 —— 到「修改」页拖框`, true);
+    setMsg(`生成完成 ${j.seconds}s，${j.images.length} 张（提示词已清空）—— 到「修改」页拖框`, true);
   }catch(e){
     stopTimer('失败'); setMsg(e.message);
   }finally{ busyOn(false); }
