@@ -115,11 +115,23 @@
   压到 332px 就 2 列，新规则两种宽度都是 3 列。`scrollbar-gutter:stable` 再把"滚动条占不占位"钉死。
 - **拖动排序**：格子 `draggable=true`（缩略图 `draggable=false`，免得变成拖图片去新标签页），
   `dragstart/dragover/drop/dragend` 全部**委托在 `#histGrid` 上**（格子是每次重建的）。
-  拖动期间直接 `insertBefore` 真实节点（不重渲染、不碰 Flip），松手时读一遍 DOM 顺序即为结果。
+  拖动期间直接挪真实节点（不重渲染、不碰 Flip），松手时读一遍 DOM 顺序即为结果。
   刚拖完的那一下不算点击（`dragJustNow()`），否则换完顺序会把底图也换了。
+- **补位动画**（`reorderAnimated()`，手写 FLIP）：拖到某一格时**其它格子滑过去**，不是硬闪。
+  做法：先把"用户此刻看到的"位置 `getBoundingClientRect()` 量下来 → `insertBefore` → `clearProps` 落到新布局
+  → `gsap.fromTo(el, {x:dx,y:dy}, {x:0,y:0, duration:.26, power2.out, overwrite:true})`。
+  两个细节：①量位置**必须在 DOM 变动之前**，且量的是视觉 rect（含上一次没跑完的 transform），
+  这样半路拖到下一格时是**从当前位置接着走**（`killTweensOf` + `overwrite:true`，实测曲线连续、无跳变）；
+  ②`onComplete` 里 `clearProps:'transform'`，别在格子上留 `translate(0,0)`。
+  插入点没变就直接 return（`after===src || after===src.nextSibling`），否则 dragover 每 16ms 一次会白播动画。
+  **代价**：JS 逐帧、不占布局（只写 transform），所以悬停规则仍然**不能**给 `.cell` 加 transform。
 - **持久化**：`POST /api/reorder {names}` 存成面板目录下的 `hist_order.json`（ignored），
   `/api/state` 的 `recent` 改成 `ordered_recent()`：**新出的图按 mtime 排在最前面，其余按存的顺序**，
   存过但已被删掉的名字自动剔除。实测：拖动 → `已记住新的顺序` → 刷新页面顺序不变。
+- **验证拖动动效别用真 DnD**：合成 DragEvent 拖完会在 `dragend` 写一次服务端顺序（**把用户自己排的顺序覆盖掉**，
+  这次就踩了）。要只验动画就**直接调 `window.reorderAnimated(host, src, after)`**
+  （它是顶层 `function` 声明，在 window 上）——不写服务端。动画证据用页内 rAF 逐帧读
+  `getComputedStyle(el).transform`：位移应从整格宽（≈117px）在 ~260ms 内衰减到 0，收尾必须回到 `none`。
 
 ## 参考图（「生成」页）= 编辑语义：写「要改什么」，别写描述
 

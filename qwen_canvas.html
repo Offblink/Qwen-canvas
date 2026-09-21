@@ -914,9 +914,30 @@ function paintDraft(){
 function pushHist(name){ hist = [name, ...hist.filter(n => n !== name)].slice(0, 48); renderHist(); }
 
 /* 拖动排序：拖完把新顺序发给服务端存起来（重启面板/换浏览器都还在）。
-   拖动期间直接 insertBefore 真实节点（不重渲染），松手时读一遍 DOM 顺序就是结果。 */
+   拖动期间直接挪真实节点（不重渲染），松手时读一遍 DOM 顺序就是结果；
+   挪的那一下给**其它格子**补位动画（手写 FLIP），否则它们会硬闪到新位置。 */
 let dragName = null, dragMoved = false, dragEndAt = 0;
 const dragJustNow = () => dragName !== null || (Date.now() - dragEndAt) < 250;
+
+/* 手写 FLIP（比引 Flip 更可控）：拖到某个位置时，先把"用户此刻看到的"位置量下来，
+   挪完 DOM 再把其它格子从旧视觉位置补到新布局位置。用 gsap.fromTo + overwrite，
+   动画还没跑完又拖到下一格时，会**从当前视觉位置**接着走，不会抖。 */
+function reorderAnimated(host, src, after){
+  const others = [...host.querySelectorAll('.cell')].filter(x => x !== src);
+  if(!ANIM){ host.insertBefore(src, after); return; }
+  GS.killTweensOf(others);                       // 先冻住半路的动画（内联 transform 还在，量到的就是眼睛看到的）
+  const seen = new Map(others.map(el => [el, el.getBoundingClientRect()]));
+  host.insertBefore(src, after);
+  others.forEach(el => {
+    GS.set(el, {clearProps: 'transform'});       // 落到新布局位置，再算"该从哪补过来"
+    const to = el.getBoundingClientRect(), from = seen.get(el);
+    const dx = from.left - to.left, dy = from.top - to.top;
+    if(!dx && !dy) return;
+    GS.fromTo(el, {x: dx, y: dy}, {x: 0, y: 0, duration: 0.26, ease: 'power2.out', overwrite: true,
+      onComplete: () => GS.set(el, {clearProps: 'transform'})});   // 收尾别留个 translate(0,0)
+  });
+}
+
 function histDrag(host){
   host.addEventListener('dragstart', e => {
     const c = e.target.closest && e.target.closest('.cell');
@@ -933,8 +954,10 @@ function histDrag(host){
     const c = e.target.closest && e.target.closest('.cell');
     if(!src || !c || c === src) return;
     const r = c.getBoundingClientRect();
-    host.insertBefore(src, (e.clientX - r.left) > r.width / 2 ? c.nextSibling : c);
+    const after = (e.clientX - r.left) > r.width / 2 ? c.nextSibling : c;
+    if(after === src || after === src.nextSibling) return;   // 已经在位，别重复补位
     dragMoved = true;
+    reorderAnimated(host, src, after);
   });
   host.addEventListener('drop', e => { if(dragName) e.preventDefault(); });
   host.addEventListener('dragend', () => {
@@ -943,6 +966,7 @@ function histDrag(host){
     dragEndAt = Date.now();
     const moved = dragMoved;
     dragName = null; dragMoved = false;
+    // 让没跑完的补位动画自己收尾（终点就是布局位置，别在这里 kill 掉留个半截 transform）
     if(moved) commitHistOrder(host);
   });
 }
