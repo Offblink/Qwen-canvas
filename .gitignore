@@ -12,3 +12,6 @@ canvas.log.err
 
 # 本机配置（指向哪份 ComfyUI）：提交的是 canvas.json.example
 canvas.json
+
+# 历史网格拖动排序后存下来的顺序（本机数据，不进仓库）
+hist_order.json

@@ -1,5 +1,14 @@
 {
   "_说明": "拷成 canvas.json 再用。相对路径按本目录解析；环境变量 QWEN_COMFY_ROOT 等优先级更高。",
   "comfy_root": "../qwen-image-2.1/ComfyUI",
-  "comfy_autostart": true
+  "comfy_autostart": true,
+  "_llm说明": "可选：面板右上「提示词优化」开关用的大模型。api_key 只从环境变量读（默认 DEEPSEEK_API_KEY），别写进这个文件。vision=false 就只发文字、不发图。",
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-v4-flash-vision-exp",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "proxy": "http://127.0.0.1:7897",
+    "timeout": 180,
+    "vision": true
+  }
 }

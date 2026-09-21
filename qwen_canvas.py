@@ -79,8 +79,34 @@ UNET = "qwen_image_2.1_int8_convrot.safetensors"
 CLIP = "qwen3vl_8b_int8_convrot.safetensors"
 VAE = "qwen_image_2.1_vae_bf16.safetensors"
 
+# ---------- 提示词优化（可选，跟出图完全解耦）----------
+# 面板自己有"优化"开关：开了就先拿一个大模型把用户的话改写成图像模型吃得动的指令
+# （抱怨句 → 目标状态），再提交采样。配的是 canvas.json 的 llm 块 / QWEN_LLM_* 环境变量；
+# 没配 key 就整条链路不参与（前端开关直接禁用，出图照常）。
+# 注意方向相反的两条路：**对外**的 LLM 请求在本机必须走 7897 代理，
+# 而**对内**的 ComfyUI 请求必须绕开代理（见下面的 _OPENER）。
+LLM = CFG.get("llm") or {}
+
+
+def _cfg_str(key: str, default: str, env: str | None = None) -> str:
+    return str(os.environ.get(env or ("QWEN_LLM_" + key.upper())) or LLM.get(key) or default)
+
+
+LLM_BASE = _cfg_str("base_url", "https://api.deepseek.com/v1", "QWEN_LLM_BASE_URL").rstrip("/")
+LLM_MODEL = _cfg_str("model", "deepseek-v4-flash-vision-exp", "QWEN_LLM_MODEL")
+# key 只从环境变量拿（写进 canvas.json 也行，但那文件别提交）；默认认 DEEPSEEK_API_KEY
+LLM_KEY_ENV = _cfg_str("api_key_env", "DEEPSEEK_API_KEY", "QWEN_LLM_API_KEY_ENV")
+LLM_KEY = os.environ.get("QWEN_LLM_API_KEY") or os.environ.get(LLM_KEY_ENV) or ""
+LLM_PROXY = _cfg_str("proxy", os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:7897", "QWEN_LLM_PROXY")
+LLM_TIMEOUT = float(_cfg_str("timeout", "180", "QWEN_LLM_TIMEOUT"))
+# 要不要把图发给模型（vision=true 时：整图 + 框选区域各一张）。关掉就只发文字。
+LLM_VISION = _cfg_str("vision", "true", "QWEN_LLM_VISION").lower() not in ("0", "false", "no", "")
+
 # 本机服务之间的调用不走代理（系统里开着 7897 代理时 127.0.0.1 会被塞进去）
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# 对外（大模型）的调用反过来：墙内必须走代理，没配就直连
+_LLM_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({"http": LLM_PROXY, "https": LLM_PROXY} if LLM_PROXY else {}))
 
 
 def _api(path: str, payload: dict | None = None, timeout: float = 30.0):
@@ -277,6 +303,156 @@ def save_data_url(data_url: str, prefix: str) -> str:
     return name
 
 
+# ---------- 提示词优化（把用户的话改写成图像模型吃得动的指令）----------
+# 这个图像模型只认"要改成什么样"的目标状态：把抱怨照抄进去（"头都露出来了"），
+# 它会把那读成"保持现状"，于是要么原样吐回、要么把要保留的东西（头盔）整个拿掉。
+# 所以优化器干两件事：**把问题翻译成目标状态** + **把隐含的约束补全**（头盔必须还在）。
+_LLM_SYS_EDIT = """你是"图像局部重画"工具的中文提示词工程师。用户在已经生成好的图上框选了一块区域，
+写了一句口语化的要求（可能是抱怨、现状描述、半截话），你要把它改写成一条能直接喂给图像编辑模型的**指令**。
+
+这个模型只认"要改成什么样"的目标状态。把用户的抱怨、现状描述照抄进去，它会把那当成"保持现状"。
+例如用户写「头都露出来了」（他看到的是小猫的头整个露在宇航服外面、头盔都没了），正确的指令是：
+「让小猫的头部完全收进宇航服头盔里面，戴上完整的透明头盔、面罩闭合，头部不再露在头盔之外，头盔与宇航服领口自然衔接」。
+
+规则：
+1. 先把用户的话翻译成**目标状态**（他要的结果长什么样），绝不复述问题本身。
+2. 中文祈使句：「把/让 X 变成 Y」或「让 X 完全 Y」，1–2 句。
+3. 丰富细节但不改意图：写清位置关系、包含关系、朝向、开合与完整状态、材质颜色、与相邻部件怎么衔接。
+4. 把用户抱怨里隐含的"不能丢"的东西明写出来（头盔要保留且完整可见、原来的角色不能被换掉……）。
+5. 不要用"去掉/删掉/不要"这类否定式指令，一律写成"让…变成…"。
+6. 不许引入用户没暗示的新元素：不加新角色、不加新道具、不换背景、不改画风、不改整体构图。
+7. 只输出改写后的那一条指令：中文，不要引号、不要解释、不要"优化后："这种前缀、不要分点或换行。"""
+
+_LLM_SYS_T2I = """你是文生图提示词工程师。用户在本地 Qwen-Image 模型上出图，
+你要把他写的口语化提示词改写成一条**更具体、更容易出好图**的提示词。
+
+规则：
+1. 主体、动作、场景、画风必须保持原意，不许换题材、不许加他没要的元素。
+2. 补上能明显提升出图质量的细节：构图与视角、光线、材质质感、氛围、风格。
+3. 如果他写的是"改动指令"（含"把…改成…"），保持指令语义只写得更明确，不要改成描述句。
+4. 中文，一句话或逗号分隔的短语都行，不超过 80 字；不要引号、不要解释、不要前缀、不要换行分点。"""
+
+
+def llm_ready() -> bool:
+    return bool(LLM_KEY and LLM_BASE and LLM_MODEL)
+
+
+def _data_url(img: Path, max_side: int, crop: tuple | None = None) -> str:
+    """把一张图压成 JPEG data URL（可选先裁一块并留 25% 边距），给视觉模型看。"""
+    import base64
+    import io
+
+    from PIL import Image
+    with Image.open(img) as im:
+        im = im.convert("RGB")
+        if crop:
+            x1, y1, x2, y2 = (int(v) for v in crop)
+            pad = int(max(x2 - x1, y2 - y1) * 0.25)
+            im = im.crop((max(0, x1 - pad), max(0, y1 - pad),
+                          min(im.width, x2 + pad), min(im.height, y2 + pad)))
+        if max(im.size) > max_side:
+            k = max_side / max(im.size)
+            im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=88)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _tidy(text: str) -> str:
+    """模型偶尔带上引号 / 前缀 / 换行，收拾成一行再交给图像模型。"""
+    t = re.sub(r"^(?:优化后|改写后|改写为|改写|指令|结果|提示词)\s*[:：]\s*", "", text.strip())
+    t = t.strip().strip("\"'“”‘’「」")
+    parts = [p.strip() for p in t.splitlines() if p.strip()]
+    if len(parts) > 1:
+        t = "".join(parts) if re.search(r"[\u4e00-\u9fff]", t) else " ".join(parts)
+    return t.strip()
+
+
+def optimize_prompt(kind: str, raw: str, image: Path | None = None,
+                    rect: tuple | None = None) -> tuple[str, float]:
+    """把一句口语化要求改写成指令。返回（改写后的话, 秒数）。"""
+    if not llm_ready():
+        raise RuntimeError(f"没配大模型的 API key（环境变量 {LLM_KEY_ENV} 为空）")
+    if kind == "t2i":
+        sysmsg, ask = _LLM_SYS_T2I, f"用户的提示词：{raw}"
+        if image is not None:
+            ask += "（附件是他上传的参考图：这次是「改这张图」，提示词是一条改动指令）"
+    else:
+        sysmsg = _LLM_SYS_EDIT
+        where = "整个画面"
+        if image is not None:
+            w, h = image_size(image)
+            where = (f"画面里框选的区域（原图 {w}×{h} 像素，框是 "
+                     f"({rect[0]},{rect[1]}) → ({rect[2]},{rect[3]})）") if rect else "整个画面"
+        ask = f"用户在这张图的{where}上的要求：{raw}"
+    content: list[dict] = [{"type": "text", "text": ask}]
+    if LLM_VISION and image is not None:
+        content.append({"type": "text", "text": "（附件 1 = 整张图）"})
+        content.append({"type": "image_url", "image_url": {"url": _data_url(image, 896)}})
+        if rect:
+            content.append({"type": "text", "text": "（附件 2 = 框选区域的局部放大）"})
+            content.append({"type": "image_url", "image_url": {"url": _data_url(image, 512, rect)}})
+    payload = {"model": LLM_MODEL, "temperature": 0.3, "max_tokens": 2000,
+               "messages": [{"role": "system", "content": sysmsg},
+                            {"role": "user", "content": content}]}
+    req = urllib.request.Request(LLM_BASE + "/chat/completions",
+                                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                 headers={"Authorization": "Bearer " + LLM_KEY,
+                                          "Content-Type": "application/json; charset=utf-8"})
+    t0 = time.time()
+    with _LLM_OPENER.open(req, timeout=LLM_TIMEOUT) as r:
+        j = json.loads(r.read())
+    msg = ((j.get("choices") or [{}])[0].get("message") or {})
+    text = _tidy(str(msg.get("content") or ""))
+    if not text:   # 思考型模型把 max_tokens 全花在 reasoning 上时 content 会是空的
+        raise RuntimeError("模型没给出改写结果（只返回了思考过程），再试一次或调大 timeout")
+    return text, time.time() - t0
+
+
+# ---------- 历史顺序（拖动排序后持久化）----------
+# 历史网格的默认顺序是"最新在前"。用户拖动重排后把顺序存成一个小 json（面板目录下），
+# 之后 /api/state 就按它返回；**新出的图仍然排在最前面**，其余按用户排的来。
+HIST_ORDER_FILE = ROOT / "hist_order.json"
+HIST_KEEP = 500
+_order_lock = threading.Lock()
+
+
+def _load_order() -> list[str]:
+    try:
+        data = json.loads(HIST_ORDER_FILE.read_text(encoding="utf-8"))
+        return [str(x) for x in data.get("order") or []]
+    except Exception:  # noqa: BLE001   没存过 / 存坏了一律当没有
+        return []
+
+
+def save_order(names: list[str]) -> list[str]:
+    """存下用户拖出来的顺序（只留 output\\ 里真实存在的 .png，去重）。"""
+    keep, seen = [], set()
+    for n in names:
+        n = str(n)
+        if n in seen or not n.endswith(".png") or "/" in n or "\\" in n:
+            continue
+        if not (OUT / n).is_file():
+            continue
+        seen.add(n)
+        keep.append(n)
+    with _order_lock:
+        HIST_ORDER_FILE.write_text(json.dumps({"order": keep[:HIST_KEEP]}, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+    return keep
+
+
+def ordered_recent(limit: int = 48) -> list[str]:
+    """/api/state 的 recent：新图在前，其余按用户拖出来的顺序。"""
+    files = [p.name for p in OUT.glob("*.png")]
+    have = set(files)
+    order = [n for n in _load_order() if n in have]
+    known = set(order)
+    fresh = sorted((n for n in files if n not in known),
+                   key=lambda n: (OUT / n).stat().st_mtime, reverse=True)
+    return (fresh + order)[:limit]
+
+
 # ---------- input\ 卫生 ----------
 # 画布每跑一次都会往 input\ 拷底图/蒙版（base_/mask_），从不清理，攒多了很乱。
 # 策略分两类：
@@ -442,9 +618,9 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path.startswith("/api/state"):
                 self._json({"ok": True, "comfy_online": comfy_online(), "comfy_port": COMFY_PORT,
                             "canvas_port": CANVAS_PORT, "autostart": COMFY_AUTOSTART,
-                            "recent": sorted((p.name for p in OUT.glob("*.png")),
-                                             key=lambda n: (OUT / n).stat().st_mtime,
-                                             reverse=True)[:24]})
+                            "recent": ordered_recent(24),
+                            "llm": {"ready": llm_ready(), "model": LLM_MODEL, "vision": LLM_VISION,
+                                    "key_env": LLM_KEY_ENV}})
             elif self.path.startswith("/api/status"):
                 info = {"ok": True, "running": False, "queue": 0,
                         "step": _PROGRESS["step"], "steps": _PROGRESS["steps"],
@@ -490,6 +666,35 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/upload":
                 name = save_data_url(body.get("data", ""), "ref")
                 return self._json({"ok": True, "name": name})
+
+            if self.path == "/api/optimize":
+                # 把前端开关打开时提交的原话，改写成图像模型吃得动的指令（不出图，纯文本往返）
+                raw = str(body.get("prompt") or "").strip()
+                if not raw:
+                    return self._err("没有可优化的提示词")
+                if not llm_ready():
+                    return self._err(f"没配大模型的 API key（环境变量 {LLM_KEY_ENV} 为空）", 503)
+                kind = str(body.get("kind") or "region")
+                img = None
+                if LLM_VISION:
+                    if kind in ("t2i", "edit"):   # 「生成」页带参考图 = 改这张图，把参考图给它看
+                        refs = [safe_name(r) for r in (body.get("refs") or [])]
+                        cand = [INP / r for r in refs] if refs else []
+                    else:                          # 局部 / 整图：给底图（局部再多给一张框选放大）
+                        cand = [OUT / safe_name(body.get("image") or "")]
+                    img = next((p for p in cand if p.is_file()), None)
+                rect = body.get("rect")
+                rect = tuple(int(v) for v in rect) if rect and len(rect) == 4 else None
+                text, sec = optimize_prompt(kind, raw, img, rect)
+                return self._json({"ok": True, "prompt": text, "model": LLM_MODEL,
+                                   "seconds": round(sec, 1)})
+
+            if self.path == "/api/reorder":
+                # 历史网格拖动后的顺序（只存 output\ 里真实存在的图）
+                names = body.get("names") or []
+                if not isinstance(names, list):
+                    return self._err("names 要是数组")
+                return self._json({"ok": True, "order": save_order(names)})
 
             if self.path == "/api/generate":
                 if not comfy_online() and not start_comfy():

@@ -21,8 +21,21 @@
 | `comfy_log` | `QWEN_COMFY_LOG` | `<comfy_root>\qwen_server.log` | 拉起时它的 stdout |
 | `comfy_cmd` | — | `["main.py","--listen","127.0.0.1","--port",<comfy_port>]` | 相对 `comfy_root` 执行 |
 | `comfy_autostart` | `QWEN_COMFY_AUTOSTART` | `true` | `false` = 面板只当前端，绝不自己拉服务 |
+| `llm`（对象，可选） | `QWEN_LLM_*` | 无 | 提示词优化用的大模型，见下 |
 | — | `QWEN_CANVAS_PORT` | `8189` | 面板端口 |
 | — | `QWEN_COMFY_PORT` | `8188` | ComfyUI 端口 |
+
+`llm` 子键（环境变量 `QWEN_LLM_BASE_URL` / `QWEN_LLM_MODEL` / `QWEN_LLM_API_KEY_ENV` / `QWEN_LLM_PROXY` /
+`QWEN_LLM_TIMEOUT` / `QWEN_LLM_VISION`，另外 `QWEN_LLM_API_KEY` 可直接给 key）。
+
+| `llm.<键>` | 默认 | 说明 |
+|---|---|---|
+| `base_url` | `https://api.deepseek.com/v1` | OpenAI 兼容端点，只拼 `/chat/completions` |
+| `model` | `deepseek-v4-flash-vision-exp` | 本机实测：官方端点把这个名字当 `deepseek-flash` 的别名 |
+| `api_key_env` | `DEEPSEEK_API_KEY` | **key 只从环境变量读**，别写进 `canvas.json`（那文件虽然 ignored，但别养成习惯） |
+| `proxy` | `http://127.0.0.1:7897`（或 `HTTPS_PROXY`） | 对外请求必须走代理；**对内的 ComfyUI 请求反过来显式绕开代理**（两个 opener） |
+| `timeout` | `180` | 秒 |
+| `vision` | `true` | `true` 会把**用户的图发给第三方**（整图 + 框选放大）；`false` 只发文字 |
 
 实测（2026-09-21）：`QWEN_COMFY_ROOT` 指向一个不存在的目录 + `QWEN_COMFY_AUTOSTART=false` 起第二个实例（8190），
 页面/`/vendor` 正常、`/api/state` 报 `autostart:false`、`recent:[]`，不因"找不到 ComfyUI"退出；
@@ -38,6 +51,7 @@
 ├── 打开画布.cmd / qwen_canvas.ps1    起面板 + 开浏览器（-NoBrowser 只起；-Stop 只停面板，**不碰 ComfyUI**）
 ├── qwen_setup.ps1                    建/补面板自己的 .venv（Pillow + aiohttp）
 ├── canvas.json                       指向哪份 ComfyUI（见上表）
+├── hist_order.json                   历史网格拖动后的顺序（自动生成；已 gitignore）
 ├── qwen_canvas.py                    面板服务（stdlib + Pillow；aiohttp 可选）
 ├── qwen_canvas.html                  面板前端（单文件、无框架、无构建）
 ├── vendor\gsap.min.js / Flip.min.js  动效库，**本机内置、不连 CDN**（jsdelivr 直连被墙）
@@ -76,7 +90,7 @@
 |---|---|
 | **生成** | 提示词 / 尺寸（512·768·1024·1536·2048 分段胶囊）/ 步数 / 张数 / 种子（自绘步进器 − 值 +）/ 参考图区 / 生成 |
 | **修改** | 整图建议 → **待改区域卡片列表** → **列表最下方才是「应用修改」**，其下是「整图按建议重画」「清除全部框」；改完顶部「改前 / 改后」按钮亮起，进画布拖中缝对比 |
-| **历史** | 最近生成的**网格**（48 张以内），点一张换底图继续迭代（**留在历史页不跳转**）；**悬停格子右上角出现 ×**，点它弹自绘确认框，确认后从 `output\` 删掉该图 |
+| **历史** | 最近生成的**网格**（48 张以内、**固定三列**），点一张换底图继续迭代（**留在历史页不跳转**）；**按住格子可拖动排序**（顺序持久化，见下）；**悬停格子右上角出现 ×**，点它弹自绘确认框，确认后从 `output\` 删掉该图 |
 
 | 操作 | 效果 |
 |---|---|
@@ -91,6 +105,21 @@
 裸数字与 `<image1>` 等价的实测依据在模型侧 `QWEN21_NOTES.md`）。
 
 实测耗时（1024²/25 步，模型侧数字）：文生图 13–26 s、参考图编辑 35–40 s、应用修改每块 27–37 s。
+
+### 历史网格：固定三列 + 拖动排序（2026-09-22 加）
+
+- **列数固定三列**（`grid-template-columns:repeat(3,minmax(0,1fr))`）。原来是
+  `repeat(auto-fill,minmax(104px,1fr))`，列数跟着可用宽度算：侧栏内容宽 338px，三列要
+  3×104+24 = 336 —— 只多 2px。竖滚动条一出现（自绘滚动条 10px）可用宽度变 328 → **当场掉成两列**
+  （图多的时候滚动条出现、图少时消失，所以"有时两列"是这么来的）。实测：338px 下老规则 3 列、
+  压到 332px 就 2 列，新规则两种宽度都是 3 列。`scrollbar-gutter:stable` 再把"滚动条占不占位"钉死。
+- **拖动排序**：格子 `draggable=true`（缩略图 `draggable=false`，免得变成拖图片去新标签页），
+  `dragstart/dragover/drop/dragend` 全部**委托在 `#histGrid` 上**（格子是每次重建的）。
+  拖动期间直接 `insertBefore` 真实节点（不重渲染、不碰 Flip），松手时读一遍 DOM 顺序即为结果。
+  刚拖完的那一下不算点击（`dragJustNow()`），否则换完顺序会把底图也换了。
+- **持久化**：`POST /api/reorder {names}` 存成面板目录下的 `hist_order.json`（ignored），
+  `/api/state` 的 `recent` 改成 `ordered_recent()`：**新出的图按 mtime 排在最前面，其余按存的顺序**，
+  存过但已被删掉的名字自动剔除。实测：拖动 → `已记住新的顺序` → 刷新页面顺序不变。
 
 ## 参考图（「生成」页）= 编辑语义：写「要改什么」，别写描述
 
@@ -111,6 +140,43 @@ KSampler 从 `[4,2]`（同一节点给的空 latent，尺寸由 `resolution` 决
 编号（缩略图徽标 1/2/3）写进提示词即可；`REF_BARE=true` 时裸数字与 `<image1>` 等价（模型侧实测）。
 **多图"把 A 的元素放进 B"很弱**（两种写法都失败，见模型侧笔记）。
 
+## 提示词优化（可选开关，2026-09-22 加）
+
+右上角「改前 / 改后」左边一个开关滑块。**滑到 on：每次提交前先让大模型把用户写的话改写成图像模型吃得动的指令**，
+再拿去采样。开关状态存 `localStorage`（`qwen_opt`，默认关）；没配 `llm` / 环境变量里没 key 时开关禁用
+（`optSw.off` + tooltip 写明原因），出图链路完全不受影响。
+
+**它解决的问题**（不是锦上添花）：图像模型只认"要改成什么样"的目标状态。用户的抱怨照抄进去
+（「头都露出来了」），模型把它读成"保持现状" —— 要么原样吐回，要么**把该保留的东西一起拿掉**。
+所以优化器干两件事：**把问题翻译成目标状态** + **把隐含约束补全**（头盔必须还在、角色不能被换掉）。
+生成页则只做"丰富"（构图/光线/材质/风格），不改题材；带参考图时按"改动指令"处理。
+
+本机实测对照（`qwen21_local_00009_.png` 那只头露在外面的宇航员小猫，框选头部 (340,190)-(690,650)，
+1024²/25 步，seed 12345，同一次采样配置）：
+
+| 提交的内容 | 出图结果 |
+|---|---|
+| 原话「头都露出来了」（optimize 关） | **头整个没了**，只剩宇航服上一个空领口环（`qwen21_local_00010_.png`） |
+| 优化后「让这只虎斑小猫的头部完全收进宇航服的透明头盔里面，额头、两只耳朵和脸颊都被闭合的圆形透明面罩整体罩住，面罩与宇航服的高领口严密衔接成一体，头盔保持通透……宇航服的衣身、胸前装置、背带以及小猫蹲坐的姿态和画面整体构图都保持原样不变。」 | **头盔戴上了、头在透明圆顶里**，其余（月球背景、宇航服、胸前相机、姿态、构图）不变（`qwen21_local_00011_.png`） |
+
+（两张都用视觉模型复查过："有没有头、头在不在头盔里"。）
+
+实现要点：
+
+- 服务端 `optimize_prompt(kind, raw, image, rect)`，`kind`：`t2i`（生成页无参考图）/ `edit`（生成页带参考图）/
+  `region`（框选建议，**一个框一次调用**，逐块串行）/ `whole`（整图建议）。两个系统提示词在
+  `_LLM_SYS_EDIT` / `_LLM_SYS_T2I`（中文，7 条规则：翻成目标状态、祈使句、「不能丢」明写出来、
+  不用否定式、不许加元素、只输出那一句）。
+- **带图**（`vision=true`）：整图缩到最长边 896 + 框选区域裁一块（**外扩 25% 边距**，缩到 512）一起发，
+  这样模型能看到"头盔本来该在哪"这种框外信息；图一律转 JPEG q88 再 base64。
+- `_tidy()` 收尾：模型爱加的「优化后：」前缀、引号、换行都清掉（中文换行直接拼、英文用空格）。
+- 思考型模型（deepseek-flash 有 `reasoning_content`）**会把 max_tokens 花在思考上**，所以给到 2000；
+  万一 `content` 还是空的，直接报错（"模型没给出改写结果"），不拿空串去采样。
+- 空 `prompt` / 没 key → 400/503 明确报错；优化失败**直接中止本次提交**（不静默退回原话），
+  因为用户开了开关就是期待被改写。改写结果**写回输入框 / 区域卡片**，跑图那几十秒里看得见用的是哪句。
+- 两个 opener 方向相反：`_LLM_OPENER` 走代理（7897，墙内必须），`_OPENER` 绕开代理（127.0.0.1）。
+- 延迟实测 0.9–3.7 s / 次（多块串行 = 块数 × 这个数）。
+
 ## 服务实现要点
 
 - **ComfyUI HTTP API 的一层壳**，不自己加载模型：图落在 `output\`，显存是同一个服务。
@@ -122,8 +188,10 @@ KSampler 从 `[4,2]`（同一节点给的空 latent，尺寸由 `resolution` 决
   = 给它一个"没有窗口的 console"，孩子继承得到，屏幕干净；ComfyUI 仍然不依赖面板的 console，面板退出它照跑。
 - **验收这种"有没有弹窗"必须用窗口枚举**（`EnumWindows` + `IsWindowVisible` + `GetWindowThreadProcessId`），
   别靠肉眼看任务栏、也别只查进程：修前那个窗口 `title=''`，任务栏不显眼，而进程数一点变化都没有。
-- 接口：`GET /api/state`（在线状态 + `autostart` + 最近图）、`GET /api/status`（队列 + **采样步数 `step/steps`**）、
-  `POST /api/start`、`POST /api/generate`、`POST /api/local`（`regions` 为空 = 整图重画）、
+- 接口：`GET /api/state`（在线状态 + `autostart` + 最近图（按存的顺序）+ `llm.ready`）、
+  `GET /api/status`（队列 + **采样步数 `step/steps`**）、`POST /api/start`、`POST /api/generate`、
+  `POST /api/local`（`regions` 为空 = 整图重画）、`POST /api/optimize`（把一句话改写成指令，见上节）、
+  `POST /api/reorder`（历史网格拖动后的顺序）、
   `POST /api/upload`（参考图，data URL）、`POST /api/delete`（`{name}` 删 `output\` 下的某张图；
   只认裸文件名 + `.png`，`..`/子路径/非 png 一律 404）、`GET /vendor/<name>.js`、`GET /img?name=&dir=`。
 - **改 `.html` 不用重启服务**（服务端每次从磁盘读）；**改 `.py` 要重启**：`qwen_canvas.ps1 -Stop` → 等 `netstat` 确认 8189

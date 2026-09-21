@@ -71,7 +71,8 @@
         box-shadow:6px 6px 12px var(--sh-d),-6px -6px 12px var(--sh-l)}
 
   #pages{flex:1;min-height:0;position:relative}
-  .page{position:absolute;inset:0;overflow:auto;display:none;padding:4px 8px 8px 4px}
+  .page{position:absolute;inset:0;overflow:auto;display:none;padding:4px 8px 8px 4px;
+        scrollbar-gutter:stable}   /* 滚动条出现/消失不再改内容宽度（否则网格会跟着换列） */
   .page.on{display:block}
 
   /* ---------- 字段 ---------- */
@@ -124,6 +125,31 @@
        box-shadow:0 0 0 2px rgba(108,122,224,.25),5px 5px 12px rgba(108,122,224,.4)}
   .pill.on:not(:disabled):hover{color:#fff;background:linear-gradient(145deg,#8590ea,#616fd8);
        box-shadow:0 0 0 2px rgba(108,122,224,.32),6px 6px 14px rgba(108,122,224,.48)}
+
+  /* ---------- 开关滑块（提示词优化）---------- */
+  .sw{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
+       padding:6px 12px 6px 8px;border-radius:11px;
+       box-shadow:5px 5px 10px var(--sh-d),-5px -5px 10px var(--sh-l);
+       transition:box-shadow .18s ease,opacity .18s ease}
+  .sw:not(.off):hover{box-shadow:6px 6px 12px var(--sh-d),-6px -6px 12px var(--sh-l)}
+  .sw:not(.off):active{box-shadow:inset 3px 3px 7px var(--sh-d),inset -3px -3px 7px var(--sh-l)}
+  .sw.off{opacity:.5;cursor:default}
+  .sw input{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
+  .sw .track{position:relative;width:34px;height:18px;flex:0 0 34px;border-radius:99px;
+       box-shadow:inset 3px 3px 6px var(--sh-d),inset -3px -3px 6px var(--sh-l);
+       transition:background .2s ease,box-shadow .2s ease}
+  .sw .dot{position:absolute;top:1px;left:1px;width:16px;height:16px;border-radius:99px;
+       background:var(--bg);box-shadow:2px 2px 5px var(--sh-d),-1px -1px 3px var(--sh-l);
+       transition:left .2s ease,background .2s ease}
+  .sw input:checked + .track{background:linear-gradient(145deg,#7b88e6,#5a68d0);
+       box-shadow:inset 3px 3px 7px rgba(60,72,170,.5),inset -2px -2px 5px rgba(190,200,255,.35)}
+  .sw input:checked + .track .dot{left:17px;background:#fff}
+  /* 键盘走到开关上也得看得见（input 被藏了，把焦点环画到轨道上） */
+  .sw input:focus-visible + .track{outline:2px solid var(--accent);outline-offset:2px}
+  .sw .lb{font-size:12.5px;font-weight:600;color:var(--dim);white-space:nowrap;
+       transition:color .15s ease}
+  .sw input:checked ~ .lb{color:var(--accent-2)}
+  .sw:not(.off):hover .lb{color:var(--fg)}
 
   /* ---------- 画布 ---------- */
   #stage{flex:1;min-height:0;overflow:auto;display:flex;align-items:center;justify-content:center;padding:6px 24px 24px}
@@ -201,9 +227,12 @@
   .ref .rm:hover{color:#fff;background:var(--warn);transform:scale(1.08)}
 
   /* ---------- 历史 ---------- */
-  #histGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:12px}
+  /* 固定三列：原来 repeat(auto-fill,minmax(104px,1fr)) 在竖滚动条出现时可用宽度少了 10px，
+     3×104+24 刚好不再成立 → 列数当场从 3 掉到 2（同一批图、窗口没动，列数却会变）。 */
+  #histGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
   .cell{position:relative;border-radius:12px;padding:5px;cursor:pointer;transition:box-shadow .18s ease;
        box-shadow:5px 5px 11px var(--sh-d),-5px -5px 11px var(--sh-l)}
+  .cell.dragging{opacity:.45}
   .cell:hover{box-shadow:0 0 0 2px rgba(108,122,224,.35),5px 5px 11px var(--sh-d),-5px -5px 11px var(--sh-l)}
   .cell.cur{box-shadow:0 0 0 3px rgba(108,122,224,.5),5px 5px 11px var(--sh-d),-5px -5px 11px var(--sh-l)}
   .cell.cur:hover{box-shadow:0 0 0 3px rgba(108,122,224,.62),6px 6px 13px var(--sh-d),-6px -6px 13px var(--sh-l)}
@@ -299,6 +328,11 @@
     <div id="workbar">
       <span class="brand">Qwen-Image-2.1 画布<small>拖框 → 写建议 → 应用修改</small></span>
       <span class="grow"></span>
+      <label class="sw off" id="optSw">
+        <input type="checkbox" id="optChk">
+        <span class="track"><span class="dot"></span></span>
+        <span class="lb">提示词优化</span>
+      </label>
       <button class="pill" id="btnCmp" disabled>改前 / 改后</button>
       <button class="pill" id="btnComfy">ComfyUI 原生界面</button>
     </div>
@@ -387,7 +421,7 @@
       <!-- ================= 历史 ================= -->
       <div class="page" id="page-hist">
         <div class="fld">
-          <div class="lab">最近生成<span class="dim">点一张换底图继续迭代</span></div>
+          <div class="lab">最近生成<span class="dim">点一张换底图；按住拖动可换顺序（自动记住）</span></div>
           <div id="histGrid"></div>
         </div>
       </div>
@@ -455,7 +489,37 @@ function busyOn(t){
   document.querySelectorAll('#segSize button, .stepper button').forEach(b => b.disabled = t);
   tabs.forEach(b => b.disabled = t);
   if(t) ringShow(true);
+  paintOpt();         // 跑的时候别让开关被拨（连同"有没有配 key"一起重算）
   updateCmpBtn();     // 开跑/收工都要重算：对比按钮的可用性同时取决于 busy 和"有没有改前改后这一对"
+}
+
+/* ================= 提示词优化（可选开关）=================
+   打开后，提交前先让服务端找大模型把用户的话改写成图像模型吃得动的指令。
+   为什么必须改：图像模型只认"要改成什么样"的目标状态，用户的抱怨照抄进去
+   （「头都露出来了」）会被读成"保持现状" —— 要么原样吐回，要么把该留的头盔一起拿掉。
+   没配 API key 时开关直接禁用（出图链路一点都不受影响）。 */
+const OPT_LS = 'qwen_opt';
+let optOn = false, llmInfo = null;
+const optSw = $('optSw'), optChk = $('optChk');
+function paintOpt(){
+  const ready = !!(llmInfo && llmInfo.ready);
+  optSw.classList.toggle('off', !ready || busy);
+  optChk.disabled = !ready || busy;
+  optChk.checked = ready && optOn;
+  optSw.title = ready
+    ? `提交前用 ${llmInfo.model} 把提示词/建议改写成模型吃得动的指令` +
+      (llmInfo.vision ? '（会把底图和框选区域发给它）' : '（只发文字）')
+    : '用不了：面板没配大模型 API key（canvas.json 的 llm.api_key_env 或 QWEN_LLM_API_KEY）';
+}
+optChk.onchange = () => {
+  optOn = !!(llmInfo && llmInfo.ready) && optChk.checked;
+  try{ localStorage.setItem(OPT_LS, optOn ? '1' : '0'); }catch(_){}
+  paintOpt();
+  setMsg(optOn ? '提示词优化已开启 —— 建议照口语写就行' : '提示词优化已关闭', true);
+}
+/* 把一句话交给服务端改写；kind：t2i 文生图 / edit 参考图编辑 / region 框选 / whole 整图 */
+async function optimize(kind, prompt, extra){
+  return await api('/api/optimize', Object.assign({kind, prompt}, extra || {}));
 }
 
 /* ================= 动效工具箱 =================
@@ -848,6 +912,49 @@ function paintDraft(){
 
 /* ---------- 历史 ---------- */
 function pushHist(name){ hist = [name, ...hist.filter(n => n !== name)].slice(0, 48); renderHist(); }
+
+/* 拖动排序：拖完把新顺序发给服务端存起来（重启面板/换浏览器都还在）。
+   拖动期间直接 insertBefore 真实节点（不重渲染），松手时读一遍 DOM 顺序就是结果。 */
+let dragName = null, dragMoved = false, dragEndAt = 0;
+const dragJustNow = () => dragName !== null || (Date.now() - dragEndAt) < 250;
+function histDrag(host){
+  host.addEventListener('dragstart', e => {
+    const c = e.target.closest && e.target.closest('.cell');
+    if(!c || busy) return e.preventDefault();
+    dragName = c.dataset.name; dragMoved = false;
+    c.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try{ e.dataTransfer.setData('text/plain', dragName); }catch(_){}
+  });
+  host.addEventListener('dragover', e => {
+    if(!dragName) return;
+    e.preventDefault();                       // 不 preventDefault 就不算可放下的目标
+    const src = host.querySelector('.cell.dragging');
+    const c = e.target.closest && e.target.closest('.cell');
+    if(!src || !c || c === src) return;
+    const r = c.getBoundingClientRect();
+    host.insertBefore(src, (e.clientX - r.left) > r.width / 2 ? c.nextSibling : c);
+    dragMoved = true;
+  });
+  host.addEventListener('drop', e => { if(dragName) e.preventDefault(); });
+  host.addEventListener('dragend', () => {
+    const src = host.querySelector('.cell.dragging');
+    if(src) src.classList.remove('dragging');
+    dragEndAt = Date.now();
+    const moved = dragMoved;
+    dragName = null; dragMoved = false;
+    if(moved) commitHistOrder(host);
+  });
+}
+async function commitHistOrder(host){
+  const names = [...host.querySelectorAll('.cell')].map(c => c.dataset.name).filter(Boolean);
+  hist = names.concat(hist.filter(n => !names.includes(n)));   // 本地顺序立刻生效
+  try{
+    await api('/api/reorder', {names});
+    setMsg('已记住新的顺序', true);
+  }catch(e){ setMsg('顺序没存上: ' + e.message); }
+}
+
 function renderHist(){
   const host = $('histGrid');
   flipWrap(host, '.cell', () => {
@@ -860,10 +967,13 @@ function renderHist(){
       const c = document.createElement('div');
       c.className = 'cell' + (n === current ? ' cur' : '');
       c.dataset.flipId = 'hist-' + n;
-      c.title = n + '（点一下换底图；右上角 × 删掉）';
+      c.dataset.name = n;
+      c.draggable = true;                    // 按住拖就能换顺序
+      c.title = n + '（点一下换底图；按住拖动换顺序；右上角 × 删掉）';
       const im = document.createElement('img');
       im.src = '/img?name=' + encodeURIComponent(n) + '&dir=output';
       im.loading = 'lazy';
+      im.draggable = false;                  // 让拖动落在格子上，别变成拖图片去新标签页
       const cap = document.createElement('div');
       cap.className = 'cap';
       cap.textContent = n.replace(/^qwen21_/, '').replace(/_\.png$/, '');
@@ -871,8 +981,12 @@ function renderHist(){
       kill.className = 'kill'; kill.type = 'button'; kill.title = '删掉这张图';
       kill.textContent = '×';
       kill.onclick = e => { e.stopPropagation(); deleteHist(n); };
-      // 换底图但**不切页**，留在历史里继续挑
-      c.onclick = () => { regions = []; sel = null; show(n); setMsg('已把 ' + n + ' 设为底图 —— 到「修改」页拖框', true); };
+      // 换底图但**不切页**，留在历史里继续挑（刚拖完的那一下不算点击）
+      c.onclick = () => {
+        if(dragJustNow()) return;
+        regions = []; sel = null; show(n);
+        setMsg('已把 ' + n + ' 设为底图 —— 到「修改」页拖框', true);
+      };
       c.append(im, cap, kill);
       host.appendChild(c);
     });
@@ -1048,10 +1162,18 @@ function stopTimer(msg, seconds){
 
 /* ---------- 动作 ---------- */
 $('btnGen').onclick = async () => {
-  const prompt = $('prompt').value.trim();
+  let prompt = $('prompt').value.trim();
   if(!prompt){ setMsg('提示词不能为空'); return; }
-  setMsg(''); busyOn(true); startTimer('生成中');
+  setMsg(''); busyOn(true);
   try{
+    if(optOn){                                     // 先改写：口语/抱怨 → 指令
+      setStatus('优化提示词'); ringShow(true); ringMode(null);
+      const o = await optimize(refs.length ? 'edit' : 't2i', prompt, {refs});
+      prompt = o.prompt;
+      $('prompt').value = prompt;                  // 写回输入框，跑的时候能看见用的是哪句
+      setMsg(`已优化（${o.seconds}s）→ ${prompt}`, true);
+    }
+    startTimer('生成中');
     const j = await api('/api/generate', {
       prompt, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       count: stCount.get(), refs
@@ -1074,8 +1196,19 @@ $('btnApply').onclick = async () => {
   if(!use.length){ setMsg('至少给一块区域写一句改动建议'); return; }
   if(regions.some(r => !r.note.trim())){ setMsg('有区域没写建议，先补上或删掉'); return; }
   const before = current;
-  setMsg(''); busyOn(true); startTimer(`逐块重画 (${use.length} 块)`);
+  setMsg(''); busyOn(true);
   try{
+    if(optOn){                                     // 每块建议都改写一遍（看得见底图 + 框选区域）
+      setStatus('优化建议'); ringShow(true); ringMode(null);
+      const t0 = Date.now();
+      for(const r of use){
+        const o = await optimize('region', r.note, {image: current, rect: [r.x1, r.y1, r.x2, r.y2]});
+        r.note = o.prompt;
+        renderRegions();                           // 改写字面写回卡片，出图的这半分钟里能核对
+      }
+      setMsg(`已优化 ${use.length} 条建议（${((Date.now() - t0) / 1000).toFixed(1)}s）`, true);
+    }
+    startTimer(`逐块重画 (${use.length} 块)`);
     const j = await api('/api/local', {
       image: current, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       regions: use.map(r => ({x1:r.x1, y1:r.y1, x2:r.x2, y2:r.y2, note:r.note}))
@@ -1094,11 +1227,19 @@ $('btnApply').onclick = async () => {
 
 $('btnWhole').onclick = async () => {
   if(!current){ setMsg('先生成或选一张图'); return; }
-  const note = $('wholeNote').value.trim() || $('prompt').value.trim();
+  let note = $('wholeNote').value.trim() || $('prompt').value.trim();
   if(!note){ setMsg('写一句整图建议（或填在上面「生成」页的提示词里）'); return; }
   const before = current;
-  setMsg(''); busyOn(true); startTimer('整图重画');
+  setMsg(''); busyOn(true);
   try{
+    if(optOn){
+      setStatus('优化建议'); ringShow(true); ringMode(null);
+      const o = await optimize('whole', note, {image: current});
+      note = o.prompt;
+      $('wholeNote').value = note;                 // 写回，重画期间能核对用的是哪句
+      setMsg(`已优化（${o.seconds}s）→ ${note}`, true);
+    }
+    startTimer('整图重画');
     const j = await api('/api/local', {
       image: current, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       regions: [], prompt: note
@@ -1131,10 +1272,15 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------- 启动 ---------- */
+histDrag($('histGrid'));
 (async () => {
+  try{ optOn = localStorage.getItem(OPT_LS) === '1'; }catch(_){}
+  paintOpt();
   try{
     const s = await api('/api/state');
     hist = s.recent || [];
+    llmInfo = s.llm || null;
+    paintOpt();                       // 拿到 llm.ready 才知道这个开关能不能用
     renderHist();
     if(hist.length) show(hist[0]);
     setStatus(s.comfy_online ? 'ComfyUI 在线'
