@@ -471,7 +471,7 @@ let regions = [];        // {id,x1,y1,x2,y2,note}
 let seq = 0, sel = null;
 let refs = [];           // 已上传的参考图文件名
 let hist = [];           // 最近生成的图（名字）
-let timer = null, lastFocus = null;
+let busy = false, timer = null, lastFocus = null;
 let madeHere = null;     // 本次会话产出过的图（生成 / 局部重画）——「生成」页只显示它
 let page = 'gen';        // 当前页签
 /* 空态文案：真空态 / 「生成」页不摆历史图时（`showPage('gen')` 在启动时就会用到，必须在这之前定义） */
@@ -484,9 +484,11 @@ const setElapsed = t => $('elapsed').textContent = t || '';
 const setQueue  = t => $('queue').textContent = t || '';
 function setMsg(t, ok){ $('msg').textContent = t || ''; $('msg').className = t && ok ? 'ok' : ''; }
 function busyOn(t){
+  busy = t;
   // 跑的时候**只锁两页底部的动作按钮**（免得重复提交 —— 一次请求就吃满 12 GB 卡）。
-  // 页签、参数、参考图、优化开关、对比、历史拖拽/换底图/删图、画布拖框全部照常 ——
+  // 页签、参数、参考图、优化开关、对比、历史的换底图/拖排序/删图全部照常 ——
   // 这些值都是"提交那一刻才读"的，改了只影响下一轮；上一批框在提交时就已交给服务端。
+  // **例外：画布上拖新框不接**（见 wrap mousedown），那张图马上就要被新图替换了。
   ['btnGen','btnApply','btnWhole','btnClear'].forEach(b => $(b).disabled = t);
   if(t) ringShow(true);
 }
@@ -891,7 +893,9 @@ function toNat(e){
 wrap.addEventListener('mousedown', e => {
   if(e.button !== 0 || !current || cmpState.on) return;
   if(e.target.closest('.box, .rm, .numBadge, #cmpHandle')) return;
-  // 出图中照样能拖新框：这批框是给**下一轮**用的（提交时就把上一批交出去了）
+  // 出图中不接新框：这张图马上就要被出图结果替换掉（文生图/整图重画还可能换尺寸），
+  // 这时候画的框对不上新图。别的都放开，只有这一处挡 —— 但要说话，别静默失败。
+  if(busy){ setMsg('出图中 —— 这张跑完再拖框'); return; }
   const p = toNat(e);
   dragging = {x1:p.x, y1:p.y, x2:p.x, y2:p.y};
   $('draftNo').textContent = regions.length + 1;
