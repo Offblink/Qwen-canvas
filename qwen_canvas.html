@@ -471,7 +471,7 @@ let regions = [];        // {id,x1,y1,x2,y2,note}
 let seq = 0, sel = null;
 let refs = [];           // 已上传的参考图文件名
 let hist = [];           // 最近生成的图（名字）
-let busy = false, timer = null, lastFocus = null;
+let busy = false, timer = null, lastFocus = null, busyHinted = false;
 let madeHere = null;     // 本次会话产出过的图（生成 / 局部重画）——「生成」页只显示它
 let page = 'gen';        // 当前页签
 /* 空态文案：真空态 / 「生成」页不摆历史图时（`showPage('gen')` 在启动时就会用到，必须在这之前定义） */
@@ -485,12 +485,10 @@ const setQueue  = t => $('queue').textContent = t || '';
 function setMsg(t, ok){ $('msg').textContent = t || ''; $('msg').className = t && ok ? 'ok' : ''; }
 function busyOn(t){
   busy = t;
-  ['btnGen','btnApply','btnWhole','btnClear','btnComfy','btnPick'].forEach(b => $(b).disabled = t);
-  document.querySelectorAll('#segSize button, .stepper button').forEach(b => b.disabled = t);
-  tabs.forEach(b => b.disabled = t);
-  if(t) ringShow(true);
-  paintOpt();         // 跑的时候别让开关被拨（连同"有没有配 key"一起重算）
-  updateCmpBtn();     // 开跑/收工都要重算：对比按钮的可用性同时取决于 busy 和"有没有改前改后这一对"
+  // 跑的时候**只锁两页底部的动作按钮**（免得重复提交）。页签、参数、参考图、对比、提示词优化开关
+  // 全都照常能用 —— 等图的这半分钟可以翻历史、调下一轮的参数。
+  ['btnGen','btnApply','btnWhole','btnClear'].forEach(b => $(b).disabled = t);
+  if(t){ ringShow(true); busyHinted = false; }
 }
 
 /* ================= 提示词优化（可选开关）=================
@@ -503,8 +501,8 @@ let optOn = false, llmInfo = null;
 const optSw = $('optSw'), optChk = $('optChk');
 function paintOpt(){
   const ready = !!(llmInfo && llmInfo.ready);
-  optSw.classList.toggle('off', !ready || busy);
-  optChk.disabled = !ready || busy;
+  optSw.classList.toggle('off', !ready);
+  optChk.disabled = !ready;                // 出图中也能拨：开关在「提交前」才被读
   optChk.checked = ready && optOn;
   optSw.title = ready
     ? `提交前用 ${llmInfo.model} 把提示词/建议改写成模型吃得动的指令` +
@@ -637,7 +635,7 @@ function cmpAvailable(){
             && hist.includes(cmpState.before));
 }
 function updateCmpBtn(){
-  btnCmp.disabled = busy || !cmpAvailable();
+  btnCmp.disabled = !cmpAvailable();       // 出图中也允许看上一对（跑完 show() 会自己退出对比）
   btnCmp.classList.toggle('on', cmpState.on && !btnCmp.disabled);
 }
 function cmpApply(pct){
@@ -840,7 +838,11 @@ function renderRegions(){
       ta.rows = 2; ta.dataset.rid = r.id;
       ta.placeholder = '例：把招牌上的文字改成 CLOSED';
       ta.value = r.note;
-      ta.oninput = () => { r.note = ta.value; };
+      ta.oninput = () => {
+        r.note = ta.value;
+        // 出图中跑完会把 regions 清空：在这时候改建议会白改，提醒一次
+        if(busy && !busyHinted){ busyHinted = true; setMsg('出图中 —— 跑完会清空所有框和建议，先别在这儿改'); }
+      };
       ta.onfocus = () => { lastFocus = ta; if(sel !== r.id){ sel = r.id; paintSel(); } };
       d.append(hd, ta);
       d.onmouseenter = () => {
@@ -873,8 +875,10 @@ function toNat(e){
   };
 }
 wrap.addEventListener('mousedown', e => {
-  if(e.button !== 0 || busy || !current || cmpState.on) return;
+  if(e.button !== 0 || !current || cmpState.on) return;
   if(e.target.closest('.box, .rm, .numBadge, #cmpHandle')) return;
+  // 出图中不接新框：跑完 regions 会被清空，这时候画的框白画 —— 但别静默失败
+  if(busy){ setMsg('出图中 —— 这张跑完再拖框'); return; }
   const p = toNat(e);
   dragging = {x1:p.x, y1:p.y, x2:p.x, y2:p.y};
   $('draftNo').textContent = regions.length + 1;
@@ -941,7 +945,9 @@ function reorderAnimated(host, src, after){
 function histDrag(host){
   host.addEventListener('dragstart', e => {
     const c = e.target.closest && e.target.closest('.cell');
-    if(!c || busy) return e.preventDefault();
+    if(!c) return e.preventDefault();
+    // 出图中不接拖动排序：出图那一下会重画整个网格，半路拖到一半会被抽走
+    if(busy){ setMsg('出图中 —— 跑完再换顺序'); return e.preventDefault(); }
     dragName = c.dataset.name; dragMoved = false;
     c.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
@@ -1008,6 +1014,7 @@ function renderHist(){
       // 换底图但**不切页**，留在历史里继续挑（刚拖完的那一下不算点击）
       c.onclick = () => {
         if(dragJustNow()) return;
+        if(busy){ setMsg('出图中 —— 跑完再点图换底图（不然结果一出来就把你选的换掉了）'); return; }
         regions = []; sel = null; show(n);
         setMsg('已把 ' + n + ' 设为底图 —— 到「修改」页拖框', true);
       };
