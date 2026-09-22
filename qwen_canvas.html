@@ -471,7 +471,7 @@ let regions = [];        // {id,x1,y1,x2,y2,note}
 let seq = 0, sel = null;
 let refs = [];           // 已上传的参考图文件名
 let hist = [];           // 最近生成的图（名字）
-let busy = false, timer = null, lastFocus = null, busyHinted = false;
+let timer = null, lastFocus = null;
 let madeHere = null;     // 本次会话产出过的图（生成 / 局部重画）——「生成」页只显示它
 let page = 'gen';        // 当前页签
 /* 空态文案：真空态 / 「生成」页不摆历史图时（`showPage('gen')` 在启动时就会用到，必须在这之前定义） */
@@ -484,11 +484,29 @@ const setElapsed = t => $('elapsed').textContent = t || '';
 const setQueue  = t => $('queue').textContent = t || '';
 function setMsg(t, ok){ $('msg').textContent = t || ''; $('msg').className = t && ok ? 'ok' : ''; }
 function busyOn(t){
-  busy = t;
-  // 跑的时候**只锁两页底部的动作按钮**（免得重复提交）。页签、参数、参考图、对比、提示词优化开关
-  // 全都照常能用 —— 等图的这半分钟可以翻历史、调下一轮的参数。
+  // 跑的时候**只锁两页底部的动作按钮**（免得重复提交 —— 一次请求就吃满 12 GB 卡）。
+  // 页签、参数、参考图、优化开关、对比、历史拖拽/换底图/删图、画布拖框全部照常 ——
+  // 这些值都是"提交那一刻才读"的，改了只影响下一轮；上一批框在提交时就已交给服务端。
   ['btnGen','btnApply','btnWhole','btnClear'].forEach(b => $(b).disabled = t);
-  if(t){ ringShow(true); busyHinted = false; }
+  if(t) ringShow(true);
+}
+
+/* 提交即清框：这批建议交给服务端之后，画布立刻空出来 —— 等图的这半分钟你可以先拖下一轮的框。
+   请求失败时**还原**这一批（前提是你还没画新框），方便改完重试。 */
+function takeRegions(){
+  const snap = regions;
+  regions = []; sel = null; render();
+  return snap;
+}
+function restoreRegions(snap){
+  if(!snap || regions.length) return;      // 你中间已经画了新框：别覆盖
+  regions = snap; sel = null; render();
+}
+/* 出图期间你如果自己挑了别的底图（或把画布清空了），结果就只落进历史，不再把画布抢回来。 */
+function takeCanvas(name, baseAtSubmit){
+  if(current && current !== baseAtSubmit) return false;
+  show(name, {reveal: true});
+  return true;
 }
 
 /* ================= 提示词优化（可选开关）=================
@@ -838,11 +856,7 @@ function renderRegions(){
       ta.rows = 2; ta.dataset.rid = r.id;
       ta.placeholder = '例：把招牌上的文字改成 CLOSED';
       ta.value = r.note;
-      ta.oninput = () => {
-        r.note = ta.value;
-        // 出图中跑完会把 regions 清空：在这时候改建议会白改，提醒一次
-        if(busy && !busyHinted){ busyHinted = true; setMsg('出图中 —— 跑完会清空所有框和建议，先别在这儿改'); }
-      };
+      ta.oninput = () => { r.note = ta.value; };
       ta.onfocus = () => { lastFocus = ta; if(sel !== r.id){ sel = r.id; paintSel(); } };
       d.append(hd, ta);
       d.onmouseenter = () => {
@@ -877,8 +891,7 @@ function toNat(e){
 wrap.addEventListener('mousedown', e => {
   if(e.button !== 0 || !current || cmpState.on) return;
   if(e.target.closest('.box, .rm, .numBadge, #cmpHandle')) return;
-  // 出图中不接新框：跑完 regions 会被清空，这时候画的框白画 —— 但别静默失败
-  if(busy){ setMsg('出图中 —— 这张跑完再拖框'); return; }
+  // 出图中照样能拖新框：这批框是给**下一轮**用的（提交时就把上一批交出去了）
   const p = toNat(e);
   dragging = {x1:p.x, y1:p.y, x2:p.x, y2:p.y};
   $('draftNo').textContent = regions.length + 1;
@@ -945,9 +958,8 @@ function reorderAnimated(host, src, after){
 function histDrag(host){
   host.addEventListener('dragstart', e => {
     const c = e.target.closest && e.target.closest('.cell');
+    // 出图中也允许拖：出图那一下会重画网格，半路拖的会被取消（顺序退回服务端那份，不会写坏）
     if(!c) return e.preventDefault();
-    // 出图中不接拖动排序：出图那一下会重画整个网格，半路拖到一半会被抽走
-    if(busy){ setMsg('出图中 —— 跑完再换顺序'); return e.preventDefault(); }
     dragName = c.dataset.name; dragMoved = false;
     c.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
@@ -1014,7 +1026,6 @@ function renderHist(){
       // 换底图但**不切页**，留在历史里继续挑（刚拖完的那一下不算点击）
       c.onclick = () => {
         if(dragJustNow()) return;
-        if(busy){ setMsg('出图中 —— 跑完再点图换底图（不然结果一出来就把你选的换掉了）'); return; }
         regions = []; sel = null; show(n);
         setMsg('已把 ' + n + ' 设为底图 —— 到「修改」页拖框', true);
       };
@@ -1196,27 +1207,32 @@ $('btnGen').onclick = async () => {
   let prompt = $('prompt').value.trim();
   if(!prompt){ setMsg('提示词不能为空'); return; }
   setMsg(''); busyOn(true);
+  const base = current;                            // 出图期间你换了底图，跑完就别把画布抢回来
+  const ta = $('prompt');
+  let keep = ta.value;
   try{
     if(optOn){                                     // 先改写：口语/抱怨 → 指令
       setStatus('优化提示词'); ringShow(true); ringMode(null);
       const o = await optimize(refs.length ? 'edit' : 't2i', prompt, {refs});
       prompt = o.prompt;
-      $('prompt').value = prompt;                  // 写回输入框，跑的时候能看见用的是哪句
+      ta.value = prompt;                           // 写回输入框，跑的时候能看见用的是哪句
+      keep = prompt;
       setMsg(`已优化（${o.seconds}s）→ ${prompt}`, true);
     }
+    ta.value = '';                                 // 提交即清：等图的半分钟先写下一句（失败会还原）
     startTimer('生成中');
     const j = await api('/api/generate', {
       prompt, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       count: stCount.get(), refs
     });
     j.images.forEach(pushHist);
-    regions = []; sel = null;
     madeHere = j.images[j.images.length - 1];      // 本次产物：「生成」页就显示它
-    show(j.images[j.images.length - 1], {reveal: true});
-    $('prompt').value = '';                        // 出图后清掉生成页的提示词（画布不动；参考图、尺寸/步数/张数/种子留着）
+    const shown = takeCanvas(madeHere, base);
     stopTimer('生成完成', j.seconds);
-    setMsg(`生成完成 ${j.seconds}s，${j.images.length} 张（提示词已清空）—— 到「修改」页拖框`, true);
+    setMsg(shown ? `生成完成 ${j.seconds}s，${j.images.length} 张 —— 到「修改」页拖框`
+                 : `生成完成 ${j.seconds}s → ${madeHere}（画布没动：你中途选了别的图）`, true);
   }catch(e){
+    if(!ta.value) ta.value = keep;                 // 没写新的就还原，方便改完重试
     stopTimer('失败'); setMsg(e.message);
   }finally{ busyOn(false); }
 };
@@ -1228,6 +1244,7 @@ $('btnApply').onclick = async () => {
   if(regions.some(r => !r.note.trim())){ setMsg('有区域没写建议，先补上或删掉'); return; }
   const before = current;
   setMsg(''); busyOn(true);
+  let keep = null;
   try{
     if(optOn){                                     // 每块建议都改写一遍（看得见底图 + 框选区域）
       setStatus('优化建议'); ringShow(true); ringMode(null);
@@ -1239,20 +1256,21 @@ $('btnApply').onclick = async () => {
       }
       setMsg(`已优化 ${use.length} 条建议（${((Date.now() - t0) / 1000).toFixed(1)}s）`, true);
     }
+    keep = takeRegions();                          // 提交即清框：等的这半分钟先拖下一轮
     startTimer(`逐块重画 (${use.length} 块)`);
     const j = await api('/api/local', {
-      image: current, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
+      image: before, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       regions: use.map(r => ({x1:r.x1, y1:r.y1, x2:r.x2, y2:r.y2, note:r.note}))
     });
     pushHist(j.image);
-    regions = []; sel = null;
     cmpState.before = before; cmpState.after = j.image;    // 给「改前 / 改后」对比用
     madeHere = j.image;
-    show(j.image, {reveal: true});
+    const shown = takeCanvas(j.image, before);
     stopTimer('改完', j.seconds);
-    setMsg(`改完 ${j.seconds}s（${j.passes.length} 块）→ ${j.image}`, true);
+    setMsg(shown ? `改完 ${j.seconds}s（${j.passes.length} 块）→ ${j.image}`
+                 : `改完 ${j.seconds}s → ${j.image}（画布没动：你中途选了别的图）`, true);
   }catch(e){
-    stopTimer('失败'); setMsg(e.message);
+    restoreRegions(keep); stopTimer('失败'); setMsg(e.message);
   }finally{ busyOn(false); }
 };
 
@@ -1262,6 +1280,7 @@ $('btnWhole').onclick = async () => {
   if(!note){ setMsg('写一句整图建议（或填在上面「生成」页的提示词里）'); return; }
   const before = current;
   setMsg(''); busyOn(true);
+  let keep = null;
   try{
     if(optOn){
       setStatus('优化建议'); ringShow(true); ringMode(null);
@@ -1270,20 +1289,21 @@ $('btnWhole').onclick = async () => {
       $('wholeNote').value = note;                 // 写回，重画期间能核对用的是哪句
       setMsg(`已优化（${o.seconds}s）→ ${note}`, true);
     }
+    keep = takeRegions();                          // 提交即清框：等的这半分钟先拖下一轮
     startTimer('整图重画');
     const j = await api('/api/local', {
-      image: current, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
+      image: before, size: segSize.get(), steps: stSteps.get(), seed: stSeed.get(),
       regions: [], prompt: note
     });
     pushHist(j.image);
-    regions = []; sel = null;
     cmpState.before = before; cmpState.after = j.image;
     madeHere = j.image;
-    show(j.image, {reveal: true});
+    const shown = takeCanvas(j.image, before);
     stopTimer('改完', j.seconds);
-    setMsg(`整图重画完成 ${j.seconds}s → ${j.image}`, true);
+    setMsg(shown ? `整图重画完成 ${j.seconds}s → ${j.image}`
+                 : `整图重画完成 ${j.seconds}s → ${j.image}（画布没动：你中途选了别的图）`, true);
   }catch(e){
-    stopTimer('失败'); setMsg(e.message);
+    restoreRegions(keep); stopTimer('失败'); setMsg(e.message);
   }finally{ busyOn(false); }
 };
 
